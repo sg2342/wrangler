@@ -42,25 +42,27 @@
 ;; type tags
 
 (defconst erlext-tag-alist
-  '((cached     . 67)
-    (newFloat   . 70)
-    (smallInt   . 97)
-    (int        . 98)
-    (float      . 99)                   ;superseded by newFloat
-    (atom       . 100)
-    (ref        . 101)                  ;superseded by newRef
-    (port       . 102)
-    (pid        . 103)
-    (smallTuple . 104)
-    (largeTuple . 105)
-    (null       . 106)
-    (string     . 107)
-    (list       . 108)
-    (bin        . 109)
-    (smallBig   . 110)
-    (largeBig   . 111)
-    (newRef     . 114)
-    (map        . 116)))
+  '((cached      . 67)
+    (newFloat    . 70)
+    (smallInt    . 97)
+    (int         . 98)
+    (float       . 99)                   ;superseded by newFloat
+    (atom        . 100)                  ;superseded bu atomU8, smallAtomU8
+    (ref         . 101)                  ;superseded by newRef
+    (port        . 102)
+    (pid         . 103)
+    (smallTuple  . 104)
+    (largeTuple  . 105)
+    (null        . 106)
+    (string      . 107)
+    (list        . 108)
+    (bin         . 109)
+    (smallBig    . 110)
+    (largeBig    . 111)
+    (newRef      . 114)
+    (map         . 116)
+    (atomU8      . 118)
+    (smallAtomU8 . 119)))
 
 (defconst erlext-max-atom-length 255 "The maximum length of an erlang atom.")
 (defconst erlext-protocol-version 131)
@@ -426,6 +428,8 @@
       ((smallBig)   (erlext-read-small-bignum))
       ((largeBig)   (erlext-read-large-bignum))
       ((map)        (erlext-read-map))
+      ((atomU8)     (erlext-read-atomU8))
+      ((smallAtomU8)     (erlext-read-small-atomU8))
       (t
        (error "Unknown tag: %S" tag)))))
 
@@ -492,6 +496,12 @@
 (defun erlext-read-float ()
   (string-to-number (erlext-readn 31)))
 
+(defun erlext-read-atomU8 ()
+  (let ((length (erlext-read2)))
+    (intern (erlext-readn length))))
+(defun erlext-read-small-atomU8 ()
+  (let ((length (erlext-read1)))
+    (intern (erlext-readn length))))
 (defun erlext-read-atom ()
   (let ((length (erlext-read2)))
     (intern (erlext-readn length))))
