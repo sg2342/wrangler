@@ -6,35 +6,45 @@
 %%%
 %%% Created : 18 Mar 2002 by Luke Gorrie <luke@bluetail.com>
 %%%-------------------------------------------------------------------
-%%%@hidden
-%%%@private
 -module(distel).
-
 -author('luke@bluetail.com').
+
+%% API
+-export([rpc_entry/3, reload_modules/0, reload_module/2,
+         eval_expression/1, find_source/1]).
+-export([process_list/0, process_info_item/2, process_summary/1,
+         process_summary_and_trace/2]).
+-export([fprof/1, fprof/3]).
+-export([debug_toggle/2, debug_add/1, break_toggle/2, break_delete/2,
+         break_add/2, break_restore/1, debug_subscribe/1, debug_attach/2]).
+-export([modules/1, functions/2, xref_modules/1, xref_functions/2,
+         rebuild_completions/0]).
+-export([free_vars/1]).
+-export([apropos/2, describe/4, get_arglists/2]).
+-export([xref_callgraph/1, who_calls/3, rebuild_callgraph/0]).
 
 -include_lib("kernel/include/file.hrl").
 
--import(lists, [any/2
-                , append/1
-                , duplicate/2
-                , filter/2
-                , flatten/1
-                , foldl/3
-                , foreach/2
-                , keysearch/3
-                , map/2
-                , member/2
-                , prefix/2
-                , reverse/1
-                , sort/1
-                , usort/1
-               ]).
+-import(lists, [any/2,
+                append/1,
+                duplicate/2,
+                filter/2,
+                flatten/1,
+                foldl/3,
+                foreach/2,
+                keysearch/3,
+                map/2,
+                member/2,
+                prefix/2,
+                reverse/1,
+                sort/1,
+                usort/1]).
 
--import(filename, [dirname/1
-                   , join/1
-                   , basename/2]).
+-import(filename, [dirname/1, join/1, basename/2]).
 
--compile(export_all).
+%% internal use
+-export([gl_proxy/1, tracer_init/2, debug_subscriber_init/2,
+         attach_init/2, attach_loop/1]).
 
 fmt(F, A) -> to_bin(io_lib:fwrite(F,A)).
 
@@ -71,15 +81,20 @@ gl_proxy(GL) ->
         {io_request, From, ReplyAs, {put_chars, C}} ->
             GL ! {put_chars, C},
             From ! {io_reply, ReplyAs, ok};
+        {io_request, From, ReplyAs, {put_chars, unicode, C}} ->
+            GL ! {put_chars, C},
+            From ! {io_reply, ReplyAs, ok};
         {io_request, From, ReplyAs, {put_chars, M, F, A}} ->
             GL ! {put_chars, flatten(apply(M, F, A))},
             From ! {io_reply, ReplyAs, ok};
-        {io_request, From, ReplyAs, {put_chars,unicode,M,F,A}} ->
+        {io_request, From, ReplyAs, {put_chars, unicode,M,F,A}} ->
             GL ! {put_chars, flatten(apply(M, F, A))},
             From ! {io_reply, ReplyAs, ok};
         {io_request, From, ReplyAs, {get_until, _, _, _}} ->
             %% Input not supported, yet
-            From ! {io_reply, ReplyAs, eof}
+            From ! {io_reply, ReplyAs, eof};
+        Unknown ->
+            GL ! {put_chars, to_bin(io_lib:format("GL DEBUG: ~p~n", [Unknown]))}
     end,
     gl_proxy(GL).
 
@@ -165,16 +180,13 @@ find_source(Mod) ->
   end.
 
 %% Ret: AbsName | throw(Reason)
+%% Ret: AbsName | throw(Reason)
 guess_source_file(Mod, BeamFName) ->
   Erl = to_list(Mod) ++ ".erl",
   Dir = dirname(BeamFName),
   DotDot = dirname(Dir),
   try_srcs([src_from_beam(Mod),
-            join([Dir, Erl]),
-            join([DotDot, "src", Erl]),
-            join([DotDot, "src", "*", Erl]),
-            join([DotDot, "esrc", Erl]),
-            join([DotDot, "erl", Erl])]).
+            filelib:wildcard(join([DotDot, "**", Erl]))]).
 
 try_srcs([]) -> throw(nothing);
 try_srcs(["" | T]) -> try_srcs(T);
@@ -501,15 +513,6 @@ debug_subscriber(Pid) ->
     end,
     debug_subscriber(Pid).
 
-debug_format(Pid, {M,F,A}, Status, Info) ->
-    debug_format_row(to_list(fmt("~w", [Pid])),
-                     to_list(fmt("~p:~p/~p", [M,F,length(A)])),
-                     to_list(fmt("~w", [Status])),
-                     to_list(fmt("~w", [Info]))).
-
-debug_format_row(Pid, MFA, Status, Info) ->
-    fmt("~-12s ~-21s ~-9s ~-21s~n", [Pid, MFA, Status, Info]).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% re-implementation of some int.erl functions
 
@@ -551,16 +554,11 @@ int_i(Mod, Exps, Abst, Srcfile, Beamfile) ->
     true = erts_debug:breakpoint({Mod,'_','_'}, true) > 0.
 
 is_interpreted(Mod) ->
-    Mod:module_info(compile) == [].
+    lists:member(Mod,int:interpreted()).
 
 int_interpreted() ->
-    [Mod || {Mod,Beamfile} <- code:all_loaded(),
-            is_list(Beamfile),
-            is_interpreted(Mod)].
-%% Attach the client process Emacs to the interpreted process Pid.
-%%
-%% spawn_link's a new process to proxy messages between Emacs and
-%% Pid's meta-process.
+    int:interpreted().
+
 debug_attach(Emacs, Pid) ->
     spawn_link(?MODULE, attach_init, [Emacs, Pid]).
 
@@ -740,7 +738,6 @@ free_vars(Text) ->
 free_vars(Text, StartLine) ->
     %% StartLine/EndLine may be useful in error messages.
     {ok, Ts, EndLine} = erl_scan:string(Text, StartLine),
-    %%Ts1 = reverse(strip(reverse(Ts))),
     Ts2 = [{'begin', 1}] ++ Ts ++ [{'end', EndLine}, {dot, EndLine}],
     case erl_parse:parse_exprs(Ts2) of
         {ok, Es} ->
@@ -751,17 +748,6 @@ free_vars(Text, StartLine) ->
         {error, {_Line, erl_parse, Reason}} ->
             {error, fmt("~s", [Reason])}
     end.
-
-strip([{',', _}   | Ts]) -> strip(Ts);
-strip([{';', _}   | Ts]) -> strip(Ts);
-strip([{'.', _}   | Ts]) -> strip(Ts);
-strip([{'|', _}   | Ts]) -> strip(Ts);
-strip([{'=', _}   | Ts]) -> strip(Ts);
-strip([{'dot', _} | Ts]) -> strip(Ts);
-strip([{'->', _}  | Ts]) -> strip(Ts);
-strip([{'||', _}  | Ts]) -> strip(Ts);
-strip([{'of', _}  | Ts]) -> strip(Ts);
-strip(Ts)                -> Ts.
 
 %% ----------------------------------------------------------------------
 %% Online documentation
@@ -943,7 +929,7 @@ get_arglist_from_forms(Funs, Forms) ->
     map(fun({Fun, Arity}) -> src_args(Forms, to_atom(Fun), Arity) end, Funs).
 
 src_args(_, _, 0) -> [];
-src_args([{tree,function,_,{function,{tree,atom,_,Func}, Clauses}} = H | T],
+src_args([{tree,function,_,{func,{tree,atom,_,Func}, Clauses}} = H | T],
          Func, Arity) ->
     case erl_syntax_lib:analyze_function(H) of
         {_, Arity} ->
@@ -1033,7 +1019,7 @@ get_int(B) ->
 
 xref_callgraph(A) ->
     F = to_list(fmt("(XXL)(Lin)(E || ~p)",[A])),
-    fun(server)-> distel_call_graph;
+    fun(server)-> distel_callgraph;
        (opts) -> [];
        (otp) -> false;
        (query_)-> F
@@ -1045,13 +1031,13 @@ who_calls(Mm, Fm, Am) ->
         {ok, Calls} = xref_query(XREF),
         append([[xform(M,F,A,L) || L <- Ls] || {{{{M,F,A},_},_}, Ls} <- Calls])
     catch _:_ ->
-        {error,not_found}
+        {error,{who_calls,"try rebuilding callgraph (C-c C-d W)"}}
     end.
 
 xform(M, F, A, L) ->
   {to_list(M),to_list(F),A,L}.
 
-rebuild_call_graph() ->
+rebuild_callgraph() ->
     xref_rebuild(xref_callgraph("")).
 %%-----------------------------------------------------------------
 %% Call graph mode:
