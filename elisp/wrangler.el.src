@@ -562,9 +562,9 @@
   "Run an Wrangler Erlang shell"
   (interactive)
   (require 'comint)
-  (setq opts (list "-name" wrangler-erl-node-string
+  (setq opts (list "-sname" wrangler-erl-node-string
                    "-pa" (expand-file-name (concat (getenv "HOME") "/.wrangler/ebin"))
-		   "-setcookie" (erl-cookie)
+		   "-setcookie" (derl-cookie)
                    "-newshell" "-env" "TERM" "vt100"))
   (setq wrangler-erlang-buffer 
  	(apply 'make-comint
